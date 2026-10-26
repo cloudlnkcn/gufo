@@ -1,0 +1,179 @@
+name: Linux native
+
+# The no-Nix Ubuntu build documented in README "Without Nix": the system
+# toolchain plus AMD's ROCm apt repository, producing x86-64 release binaries
+# with gfx1151 HIP kernels. The hosted runner has no AMD GPU, so the job
+# verifies configure, build, install and the platform smoke checks; GPU
+# diagnostics stay on the Devlab runners. Like windows.yml, Toolboxes also
+# calls this workflow to package an exact release tag.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Exact Gufo release tag to build for Toolboxes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-native-${{ inputs.release-tag || github.ref }}
+  cancel-in-progress: ${{ !inputs.release-tag }}
+
+jobs:
+  build:
+    name: Ubuntu native build (no Nix)
+    # Forks that track upstream sync this file without running it; the build
+    # only makes sense in the org repos where releases are packaged.
+    if: github.repository == 'gufo-org/gufo' || github.repository == 'gufo-org/toolboxes'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CCACHE_DIR: /tmp/gufo-ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+      CCACHE_NOHASHDIR: 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # A reusable workflow otherwise checks out its caller (Toolboxes).
+          repository: ${{ inputs.release-tag && 'gufo-org/gufo' || github.repository }}
+          ref: ${{ inputs.release-tag && format('refs/tags/{0}', inputs.release-tag) || github.ref }}
+
+      - name: Compute CMake compiler cache key
+        id: ccache-key
+        run: echo "epoch-week=$(( $(date -u +%s) / 604800 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore CMake compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/gufo-ccache
+          key: gufo-native-ccache-v1-${{ runner.os }}-${{ steps.ccache-key.outputs.epoch-week }}
+          restore-keys: |
+            gufo-native-ccache-v1-${{ runner.os }}-
+
+      # AMD's ROCm apt repository ships the gfx1151 TheRock packages the dev
+      # boxes use (amdrocm-*); the key must match /etc/apt/keyrings/amdrocm.gpg.
+      - name: Add the AMD ROCm apt repository
+        run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://stable.repo.amd.com/rocm/gpg/packages.gpg \
+            | gpg --dearmor | sudo tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
+          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/amdrocm.sources > /dev/null
+          Types: deb
+          URIs: https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/
+          Suites: stable
+          Components: main
+          Architectures: amd64
+          Signed-By: /etc/apt/keyrings/amdrocm.gpg
+          EOF
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake ninja-build pkg-config \
+            libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev \
+            libwebp-dev ffmpeg \
+            amdrocm-core10.0-gfx1151 amdrocm-runtime-dev10.0 amdrocm-llvm10.0 \
+            amdrocm-blas-dev10.0 amdrocm-hipblas-common-dev10.0 \
+            amdrocm-blas10.0-gfx1151 amdrocm-ccl-dev10.0
+
+      - name: Prepare CMake compiler cache
+        run: |
+          mkdir -p /tmp/gufo-ccache
+          chmod -R a+rwX /tmp/gufo-ccache
+          ccache --zero-stats
+
+      - name: Identify release source
+        if: inputs.release-tag
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version=$(tr -d '\r\n' < version.txt)
+          if [[ "v$version" != "$RELEASE_TAG" ]]; then
+            echo 'tag and version.txt disagree' >&2
+            exit 1
+          fi
+          revision=$(git rev-parse HEAD)
+          {
+            echo "GUFO_RELEASE_VERSION=$version"
+            echo "GUFO_REVISION=$revision"
+          } >> "$GITHUB_ENV"
+
+      # The installed binaries resolve the ROCm shared libraries through the
+      # standard /opt/rocm prefix; the build tree already carries a build
+      # rpath, the install tree needs this one. The prefix is fixed at
+      # configure time because the gufo-server symlink install rule expands
+      # it there (cmake --install --prefix would not move it). The ROCm Clang
+      # is pinned so compiler discovery cannot pick the runner's system
+      # Clang; CMake attaches ccache to C and C++ itself (CMakeLists.txt) and
+      # HIP joins like the production Nix package.
+      - name: Configure
+        run: |
+          identity=()
+          if [[ -n "${GUFO_RELEASE_VERSION:-}" ]]; then
+            identity+=("-DGUFO_RELEASE_VERSION=$GUFO_RELEASE_VERSION" "-DGUFO_REVISION=$GUFO_REVISION")
+          else
+            identity+=("-DGUFO_REVISION=$(git rev-parse --short HEAD)")
+          fi
+          cmake --preset release "${identity[@]}" \
+            -DCMAKE_PREFIX_PATH=/opt/rocm \
+            -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_HIP_COMPILER_LAUNCHER=/usr/bin/ccache \
+            -DCMAKE_INSTALL_RPATH="/opt/rocm/lib" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install/gufo"
+
+      - name: Build
+        run: |
+          cmake --build --preset release --parallel "$(nproc)"
+          ccache --show-stats
+
+      - name: Install
+        run: cmake --install build/release
+
+      - name: Smoke check
+        run: |
+          ./install/gufo/bin/gufo --version
+          ./install/gufo/bin/gufo-server --version
+          if [[ -n "${GUFO_RELEASE_VERSION:-}" ]]; then
+            expected="gufo version $GUFO_RELEASE_VERSION ($GUFO_REVISION)"
+            actual="$(./install/gufo/bin/gufo --version)"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "release reports '$actual', expected '$expected'" >&2
+              exit 1
+            fi
+          fi
+          # The hosted runner has no AMD GPU: only the platform section can
+          # pass here; full diagnosis needs the device.
+          ./install/gufo/bin/gufo diagnose --section platform
+
+      - name: Pack the release tree
+        env:
+          ARCHIVE_STEM: ${{ inputs.release-tag && format('gufo-{0}-linux-x86_64', inputs.release-tag) || 'gufo-linux-x86_64' }}
+        run: |
+          tar -czf "$ARCHIVE_STEM.tar.gz" -C install gufo
+          sha256sum "$ARCHIVE_STEM.tar.gz" > "$ARCHIVE_STEM.tar.gz.sha256"
+
+      - name: Upload the binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.release-tag && format('linux-release-{0}-{1}', inputs.release-tag, github.run_attempt) || 'gufo-linux-x86_64' }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
