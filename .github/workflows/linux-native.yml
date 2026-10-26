@@ -5,7 +5,9 @@ name: Linux native
 # with gfx1151 HIP kernels. The hosted runner has no AMD GPU, so the job
 # verifies configure, build, install and the platform smoke checks; GPU
 # diagnostics stay on the Devlab runners. Like windows.yml, Toolboxes also
-# calls this workflow to package an exact release tag.
+# calls this workflow to package an exact release tag. A manual dispatch of
+# an exact tag additionally publishes the archive to a release on the
+# repository where the run happens.
 
 on:
   push:
@@ -42,6 +44,8 @@ jobs:
       github.repository == 'gufo-org/toolboxes' ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    outputs:
+      artifact-name: ${{ inputs.release-tag && format('linux-release-{0}-{1}', inputs.release-tag, github.run_attempt) || 'gufo-linux-x86_64' }}
     timeout-minutes: 90
     env:
       CCACHE_DIR: /tmp/gufo-ccache
@@ -187,3 +191,51 @@ jobs:
           compression-level: 0
           retention-days: 7
           if-no-files-found: error
+
+  publish:
+    name: Publish the release archive
+    needs: build
+    # Only a manual dispatch of an exact tag publishes, and only on the
+    # repository where the run happens. The Toolboxes workflow_call path must
+    # not create releases: attaching official assets stays with the
+    # Toolboxes orchestrator.
+    if: inputs.release-tag != '' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download the release archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist
+
+      - name: Publish to the repository release
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes_file=$(mktemp)
+          {
+            echo "Linux x86-64 native build of the upstream \`$RELEASE_TAG\` tag"
+            echo "(no Nix, gfx1151 HIP kernels; requires a matching ROCm 10.0 runtime)."
+            echo
+            if ! body=$(gh release view "$RELEASE_TAG" --repo gufo-org/gufo --json body -q .body 2>/dev/null); then
+              body=''
+            fi
+            if [[ -n "$body" ]]; then
+              echo "## Upstream release notes"
+              echo
+              echo "$body"
+            fi
+          } > "$notes_file"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "gufo $RELEASE_TAG (Linux x86-64)" \
+              --notes-file "$notes_file"
+          fi
