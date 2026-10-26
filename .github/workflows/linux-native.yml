@@ -11,6 +11,11 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Upstream release tag to build (e.g. v0.24.0; empty builds the current ref)'
+        required: false
+        type: string
   workflow_call:
     inputs:
       release-tag:
@@ -28,9 +33,14 @@ concurrency:
 jobs:
   build:
     name: Ubuntu native build (no Nix)
-    # Forks that track upstream sync this file without running it; the build
-    # only makes sense in the org repos where releases are packaged.
-    if: github.repository == 'gufo-org/gufo' || github.repository == 'gufo-org/toolboxes'
+    # Forks that track upstream sync this file without running it; automatic
+    # builds only make sense in the org repos where releases are packaged. A
+    # manual dispatch stays available everywhere so a fork can build an
+    # upstream release tag on demand.
+    if: >-
+      github.repository == 'gufo-org/gufo' ||
+      github.repository == 'gufo-org/toolboxes' ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
