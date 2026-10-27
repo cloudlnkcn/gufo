@@ -41,7 +41,7 @@ VoiceDesign model (fixed English voice instructions). Neither requires a clone.
 
 | Suite | Required checks |
 | --- | --- |
-| Embedding | Existing text and image HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image formats, invalid inputs and recovery |
+| Embedding | Text, image and audio HTTP suites: independent reference vectors, dimensions, normalization, encodings, batch ordering, concurrent requests, image/audio formats, multiple clips, audio/text/image interleaving, invalid inputs, cancellation and recovery |
 | ASR | English transcript WER ≤ 0.15, exact greedy replay, JSON/text/verbose formats, complete SSE matching buffered output, concurrent speech/silence, rejected options, malformed WAV recovery, stream cancellation and subsequent valid inference |
 | TTS | Voice discovery, valid non-silent 24-kHz mono PCM16 audio, two fixed texts with ASR WER ≤ 0.25, exact same-seed warm replay, WAV/PCM/SSE equality, different concurrent texts/seeds, rejected inputs, stream cancellation and subsequent valid inference |
 
@@ -193,7 +193,7 @@ the same source input when comparing revisions. These are public substitutes
 for PR #613's private cases; they do not reproduce the author's exact prompts.
 Run the existing Pi `edit` and `creation` cases for real tool execution, too.
 
-`embeddings.py` checks EmbeddingGemma 2 through the OpenAI SDK against a running `gufo serve embedding`.  It covers the fixture probes against sentence-transformers float32 vectors, input order, base64 and float encodings, Matryoshka `dimensions`, concurrent identical requests, the error shapes, and `"truncate": true`, whose vector must equal that of the longest prefix that fits the token limit.  It is standalone and outside `--suite all`:
+`embeddings.py` checks EmbeddingGemma 2 through the OpenAI SDK against a running `gufo serve embedding`.  It covers the fixture probes against sentence-transformers float32 vectors, input order, base64 and float encodings, Matryoshka `dimensions`, concurrent identical requests, the error shapes, `"truncate": true`, whose vector must equal that of the longest prefix that fits the token limit, and `prompt_name`, whose vector must equal that of the same prompt written by the client.  It is standalone and outside `--suite all`:
 
 ```sh
 nix develop -c python3 tests/functional/embeddings.py \
@@ -290,12 +290,38 @@ Qwen27 Q8 remains an explicit manual functional qualification outside this bound
 CI selection. Numerical and agent-replay obligations outside the selected suites
 remain separate; representative coverage is not all-model qualification.
 
-An ephemeral GPU runner needs the documented native build dependencies, GPU
-access and enough temporary disk space for its selected checkpoints. It does not
-need mounted models or audio. `devlab_models.py` downloads only selected model
-assets and necessary drafts/projectors/evaluator weights from fixed Hugging Face
-revisions while both production binaries build. Optional `$GUFO_CI_CACHE`
-(default `$RUNNER_TOOL_CACHE/gufo`) reuse is an optimization, not a prerequisite.
+GitHub-hosted Linux runners build the candidate and main production packages
+with Nix, signed public binary caches, Cachix and a shared C/C++/HIP compiler cache.
+Both timing arms use the candidate's lock file. The binary artifact records the
+authorized revisions and executable checksums. A compressed portable bundle
+contains both executables, their pinned ELF loader, shared libraries and gfx1151
+BLAS kernel data. The GPU runner downloads directly from Actions artifacts.
+A bounded range probe
+measures the direct route; when slow, the downloader tests a rootless Cloudflare
+WARP MASQUE proxy (`usque` v4.2.1, checksum pinned) and uses it when faster.
+Only the binary transfer uses the proxy; runner control and model mirror traffic
+keep their existing routes. Temporary credentials and the loopback proxy are
+removed after transfer. The original Actions artifact SHA-256 is mandatory.
+No release relay or privileged publishing workflow is needed.
+The large Linux runtime is archived separately and cached under
+`$HF_HOME/gufo/runtimes` by SHA-256. Cache hits are hash-checked and unpacked
+locally; changed toolchains get a new content hash. Ordinary builds transfer
+only the two small executable packages. Windows PRs and manual dispatches use
+the same adaptive downloader and run device and per-family model smoke checks.
+The GPU runner unpacks and executes the verified bundle directly;
+it needs neither Nix nor administrator access and never compiles. Both binaries
+share one bundled runtime. Hosted jobs restore dependencies from signed binary
+caches; fork PRs need no cache write credentials.
+
+An ephemeral GPU runner needs GPU access and enough disk space for its selected
+checkpoints. It does not need mounted models or audio. `devlab_models.py`
+downloads only selected assets and necessary drafts/projectors/evaluator weights
+from fixed Hugging Face revisions while the hosted bundle builds and downloads.
+Linux and Windows inherit the runner's Hugging Face mirror and transfer settings.
+Model files and download metadata live under `$HF_HOME/gufo/models`, keyed by
+asset and revision, outside the disposable runner workspace. Without `HF_HOME`,
+the workflows use the user's standard `.cache/huggingface` directory. Cleanup
+preserves the models; logs report existing required files and download duration.
 The authorized controller checkout contains the English voice fixture. TTS uses
 the main Gufo binary and a pinned ASR checkpoint as its intelligibility
 evaluator. Missing downloads or fixtures fail visibly.
@@ -487,7 +513,6 @@ RAM, disk and restart settings once their contracts pass.
 | `cache-stalls` | Flash-Next AR/MTP: sequential coding/planning prompts with 6.4K/25.6K/55.6K/56K padding and three repeats each, thinking on and tg128. Checks prefix reuse and exact fully cached replay; retains each request's PP/TG and maximum-gap timing gate. Public equivalents of #632, whose prompts were not attached. Use sessions 2/context 262144 to match its capacity; minimum context 65536. Explicit selection only, outside `all` |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
-| `cache-instructions` | Release tier, Qwen profiles. A long system prompt (about 5,000 tokens) with one mail-like question, then the same system prompt with a new question: the second request, before any boundary is learned, must restore the whole system prompt rather than the nearest grid checkpoint; compare answers with uncached controls |
 | `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
 | `cache-compaction` | A tool history grows near the context limit, then a summary replaces it while system/tools stay; check shared-boundary reuse, unchanged retries, continued growth and exact uncached answers. Requires context ≥ 16384. Not in `all` |
 | `cache-transforms` | Clear an old tool result, remove a few hundred late user tokens, or retry/edit after a 10K+ result; restore coherent pre-edit boundaries and compare uncached answers. Requires context ≥ 32768. Not in `all` |
@@ -869,4 +894,16 @@ outside `--suite all`:
 ```sh
 nix develop -c python3 tests/functional/embedding_images.py \
   --base-url http://127.0.0.1:8080/v1 --output /tmp/image-embeddings.json
+```
+
+`embedding_audio.py` adds pinned official audio vectors, decoder/front-end
+fixtures, multiple clips, interleaved text/images, ordering, concurrency,
+Matryoshka/base64, expanded context bounds and server-observed cancellation.
+`family_smoke.py embedding` includes a generated one-second WAV against its
+independent official vector. Neither runner downloads recordings.
+
+```sh
+nix develop -c python3 tests/functional/embedding_audio.py \
+  --base-url http://127.0.0.1:8080/v1 --server-log /path/to/server.log \
+  --output /tmp/audio-embeddings.json
 ```
