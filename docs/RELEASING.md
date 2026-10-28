@@ -110,6 +110,14 @@ the HIP and other runtime DLLs, kernel directories and notices. Extract the
 entire archive before running the executable; use `gufo.exe serve` for the
 HTTP server.
 
+Gufo's no-Nix Linux native workflow packages the same tag as
+`gufo-<tag>-linux-x86_64.tar.gz`. The archive bundles the AMD ROCm 10.0
+userspace runtime and AMD's notices next to the binaries, so the target
+machine only needs the amdgpu kernel driver; a workflow step verifies this
+by running the packaged binary with `/opt/rocm` removed from the build host.
+A manual dispatch of that workflow on an exact tag also attaches the archive
+to the repository release.
+
 Merge the reusable Windows workflow in Gufo before enabling its Toolboxes
 caller. Toolboxes needs `RELEASE_APP_CLIENT_ID` and
 `RELEASE_APP_PRIVATE_KEY` available to its release workflow. The app must be

@@ -7,6 +7,10 @@ Transitive system/toolchain dependencies retain their upstream licenses.
 `flake.lock` pins Nixpkgs revision `2fcb964de67fcf60b43471c55d5d99e61a9ccb5a`;
 its package expressions record source revisions, patches and build options.
 Non-Nix builds must retain the notices of the versions they actually distribute.
+The no-Nix Ubuntu release pipeline bundles the AMD ROCm 10.0 userspace runtime
+(the `amdrocm` apt packages) into the archive and copies AMD's shipped license
+and notice files to `share/licenses/gufo/rocm/`; the flake-pinned versions in
+the table below describe the Nix build.
 
 ## Runtime and compiled code
 

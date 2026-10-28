@@ -2,7 +2,9 @@ name: Linux native
 
 # The no-Nix Ubuntu build documented in README "Without Nix": the system
 # toolchain plus AMD's ROCm apt repository, producing x86-64 release binaries
-# with gfx1151 HIP kernels. The hosted runner has no AMD GPU, so the job
+# with gfx1151 HIP kernels. The ROCm userspace runtime is bundled into the
+# release tree (tools/ci/bundle_rocm_runtime.py), so deployment machines only
+# need the amdgpu kernel driver. The hosted runner has no AMD GPU, so the job
 # verifies configure, build, install and the platform smoke checks; GPU
 # diagnostics stay on the Devlab runners. Like windows.yml, Toolboxes also
 # calls this workflow to package an exact release tag. A manual dispatch of
@@ -94,7 +96,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential ccache cmake ninja-build pkg-config \
+            build-essential ccache cmake ninja-build patchelf pkg-config \
             libicu-dev libcurl4-openssl-dev libssl-dev libpng-dev libjpeg-dev \
             libwebp-dev ffmpeg \
             amdrocm-core10.0-gfx1151 amdrocm-runtime-dev10.0 amdrocm-llvm10.0 \
@@ -127,14 +129,14 @@ jobs:
             echo "GUFO_REVISION=$revision"
           } >> "$GITHUB_ENV"
 
-      # The installed binaries resolve the ROCm shared libraries through the
-      # standard /opt/rocm prefix; the build tree already carries a build
-      # rpath, the install tree needs this one. The prefix is fixed at
-      # configure time because the gufo-server symlink install rule expands
-      # it there (cmake --install --prefix would not move it). The ROCm Clang
-      # is pinned so compiler discovery cannot pick the runner's system
-      # Clang; CMake attaches ccache to C and C++ itself (CMakeLists.txt) and
-      # HIP joins like the production Nix package.
+      # The /opt/rocm rpath only seeds resolution on the build host; the
+      # bundle step below repoints the installed RUNPATH at the bundled
+      # runtime. The prefix is fixed at configure time because the
+      # gufo-server symlink install rule expands it there (cmake --install
+      # --prefix would not move it). The ROCm Clang is pinned so compiler
+      # discovery cannot pick the runner's system Clang; CMake attaches
+      # ccache to C and C++ itself (CMakeLists.txt) and HIP joins like the
+      # production Nix package.
       - name: Configure
         run: |
           identity=()
@@ -158,8 +160,21 @@ jobs:
       - name: Install
         run: cmake --install build/release
 
-      - name: Smoke check
+      - name: Bundle the ROCm userspace runtime
+        run: python3 tools/ci/bundle_rocm_runtime.py --install install/gufo
+
+      # With /opt/rocm hidden, only the bundled runtime can satisfy the
+      # binary; this proves the deployment requirement is the kernel driver.
+      - name: Smoke check the bundle without a system ROCm
         run: |
+          set -euo pipefail
+          restore_rocm() {
+            if [[ -d /opt/rocm.hidden ]]; then
+              sudo mv /opt/rocm.hidden /opt/rocm
+            fi
+          }
+          trap restore_rocm EXIT
+          sudo mv /opt/rocm /opt/rocm.hidden
           ./install/gufo/bin/gufo --version
           ./install/gufo/bin/gufo-server --version
           if [[ -n "${GUFO_RELEASE_VERSION:-}" ]]; then
@@ -220,7 +235,14 @@ jobs:
           notes_file=$(mktemp)
           {
             echo "Linux x86-64 native build of the upstream \`$RELEASE_TAG\` tag"
-            echo "(no Nix, gfx1151 HIP kernels; requires a matching ROCm 10.0 runtime)."
+            echo "(no Nix, gfx1151 HIP kernels; bundles the AMD ROCm 10.0 userspace"
+            echo "runtime — only the amdgpu kernel driver is required, with read"
+            echo "access to /dev/kfd and /dev/dri)."
+            echo
+            echo "Non-ROCm shared libraries come from the base distribution. Minimal"
+            echo "systems need libcurl4, libicu74, libpng16-16, libjpeg-turbo8,"
+            echo "libwebp7, libsndfile1, libsoxr0, libssl3 and libgomp1; ffmpeg is"
+            echo "optional and only used for video and audio output."
             echo
             if ! body=$(gh release view "$RELEASE_TAG" --repo gufo-org/gufo --json body -q .body 2>/dev/null); then
               body=''

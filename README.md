@@ -232,6 +232,12 @@ Use `cmake --install build/release` to install Gufo,
 its runtime data and license notices. The GPU driver must allow your user to
 access `/dev/kfd` and `/dev/dri`; model weights are acquired separately.
 
+Release archives built by the no-Nix pipeline bundle the AMD ROCm 10.0
+userspace runtime next to the binaries, so a deployment machine only needs
+the amdgpu kernel driver (access to `/dev/kfd` and `/dev/dri`) and the
+ordinary distribution libraries named in the release notes. Building from
+source still requires the ROCm development packages above.
+
 The same source, compiler flags and install rules serve both builds. Nix pins
 the complete toolchain for reproducible comparisons; changing the compiler or
 math libraries requires the affected model's quality checks.
