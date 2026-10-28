@@ -160,8 +160,27 @@ jobs:
       - name: Install
         run: cmake --install build/release
 
+      # A release-tag build checks out the upstream tag, whose tree does not
+      # carry this workflow's bundling script; fetch it from the workflow's
+      # own commit instead.
+      - name: Checkout the workflow commit
+        if: inputs.release-tag != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: workflow-source
+
       - name: Bundle the ROCm userspace runtime
-        run: python3 tools/ci/bundle_rocm_runtime.py --install install/gufo
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          script=tools/ci/bundle_rocm_runtime.py
+          if [[ -n "$RELEASE_TAG" ]]; then
+            script=workflow-source/tools/ci/bundle_rocm_runtime.py
+          fi
+          python3 "$script" --install install/gufo
 
       # With /opt/rocm hidden, only the bundled runtime can satisfy the
       # binary; this proves the deployment requirement is the kernel driver.
