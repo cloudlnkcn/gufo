@@ -180,7 +180,26 @@ jobs:
           if [[ -n "$RELEASE_TAG" ]]; then
             script=workflow-source/tools/ci/bundle_rocm_runtime.py
           fi
-          python3 "$script" --install install/gufo
+          # The installed package subset omits the license files most
+          # bundled components ship in; extract them from the doc-bearing
+          # packages without installing.
+          docs=/tmp/rocm-license-docs
+          mkdir -p "$docs" && cd "$docs"
+          shopt -s nullglob
+          for package in amdrocm-base10.0 amdrocm-blas-host10.0 \
+                         amdrocm-runtime10.0 amdrocm-solver-host10.0 \
+                         amdrocm-profiler-base10.0 amdrocm-debugger10.0; do
+            apt-get download "$package" || echo "warning: $package not downloadable" >&2
+          done
+          for deb in ./*.deb; do
+            dpkg-deb -x "$deb" extracted/
+          done
+          doc_roots=()
+          for directory in "$docs"/extracted/opt/rocm/core-*/share/doc; do
+            doc_roots+=(--doc-root "$directory")
+          done
+          cd "$GITHUB_WORKSPACE"
+          python3 "$script" --install install/gufo "${doc_roots[@]}"
 
       # With /opt/rocm hidden, only the bundled runtime can satisfy the
       # binary; this proves the deployment requirement is the kernel driver.

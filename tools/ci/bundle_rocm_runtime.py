@@ -48,7 +48,6 @@ LICENSE_PACKAGES = {
     'libroctx64.so': ['roctracer'],
     'librocsolver.so': ['rocsolver'],
 }
-REQUIRED_LICENSES = {'rocm-core', 'rocr', 'rocblas', 'hipblas', 'hipblaslt', 'amd_comgr'}
 
 
 def output(*args):
@@ -138,28 +137,38 @@ def copy_data_trees(root):
         shutil.copytree(source, root / tree, symlinks=True, dirs_exist_ok=True)
 
 
-def copy_licenses(root):
+REQUIRED_SONAMES = ('libhsa-runtime64.so', 'librocblas.so', 'libhipblas.so',
+                    'libhipblaslt.so', 'libamd_comgr.so', 'librocm_kpack.so')
+
+
+def copy_licenses(root, extra_doc_roots):
     destination = root / 'share/licenses/gufo/rocm'
     destination.mkdir(parents=True, exist_ok=True)
-    doc = ROCM_PREFIX / 'share/doc'
-    notices = doc / 'NOTICES.txt'
-    if not notices.is_file():
-        raise ValueError(f'missing AMD notices file: {notices}')
-    shutil.copy2(notices, destination / 'NOTICES.txt')
+    covered = set()
+    # The installed package subset does not carry every AMD license file
+    # (the amdrocm -host/-base/-debugger packages ship most of them); the
+    # caller passes doc roots extracted from those packages via --doc-root.
+    doc_roots = sorted(ROCM_PREFIX.glob('core-*/share/doc')) \
+        + [ROCM_PREFIX / 'share/doc'] + list(extra_doc_roots)
+    notices = next((doc_root / 'NOTICES.txt' for doc_root in doc_roots
+                    if (doc_root / 'NOTICES.txt').is_file()), None)
+    if notices:
+        shutil.copy2(notices, destination / 'NOTICES.txt')
     bundled = {path.name for path in (root / 'lib').rglob('*')}
-    missing = set(REQUIRED_LICENSES)
     for prefix, packages in LICENSE_PACKAGES.items():
         if not any(name == prefix or name.startswith(prefix + '.') for name in bundled):
             continue
         for package in packages:
-            licenses = sorted(doc.glob(f'{package}/LICENSE*'))
-            if not licenses:
-                continue
-            missing.discard(package)
-            for license_file in licenses:
-                shutil.copy2(license_file, destination / f'{package}-{license_file.name}')
+            for doc_root in doc_roots:
+                for license_file in sorted(doc_root.glob(f'{package}/LICENSE*')):
+                    shutil.copy2(license_file, destination / f'{package}-{license_file.name}')
+                    covered.add(prefix)
+    bundled_bases = {re.sub(r'\.so(\.[0-9.]+)*$', '.so', name) for name in bundled
+                     if '.so' in name}
+    missing = [soname for soname in REQUIRED_SONAMES
+               if soname in bundled_bases and soname not in covered]
     if missing:
-        raise ValueError(f'missing required AMD license files for {sorted(missing)}')
+        raise ValueError(f'no license text found for {sorted(missing)}')
 
 
 def verify(executable, root):
@@ -194,6 +203,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--install', type=Path, required=True,
                         help='installed Gufo tree (the gufo/ directory)')
+    parser.add_argument('--doc-root', type=Path, action='append', default=[],
+                        help='extra AMD share/doc directory to search for '
+                             'license files (repeatable)')
     args = parser.parse_args()
     root = args.install.resolve()
     executable = root / 'bin/gufo'
@@ -202,7 +214,7 @@ def main():
 
     libraries = collect_closure(executable, root)
     copy_data_trees(root)
-    copy_licenses(root)
+    copy_licenses(root, args.doc_root)
     subprocess.run(['patchelf', '--set-rpath', BUNDLE_RPATH, str(executable)], check=True)
     verify(executable, root)
 
